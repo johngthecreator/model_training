@@ -26,7 +26,7 @@ A template for fine-tuning HuggingFace models on Modal cloud GPUs. The core pipe
 ### Install dependencies
 
 ```bash
-pip install torch transformers datasets evaluate sacrebleu rouge_score nltk
+pip install modal torch transformers datasets evaluate sacrebleu rouge_score nltk
 ```
 
 ### Train on Modal
