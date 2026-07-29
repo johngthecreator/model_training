@@ -6,7 +6,7 @@ A template for fine-tuning HuggingFace models on Modal cloud GPUs. The core pipe
 
 ```
 ├── train.py              # Core training script (Modal + HuggingFace Trainer)
-├── train_gec.py          # Core training script (two-stage curriculum variant)
+├── train_two_stage.py    # Core training script (two-stage curriculum variant)
 ├── push_dataset.py       # Push local CSVs to Hugging Face Hub
 ├── push_model.py         # Push trained models to Hugging Face Hub
 └── examples/
@@ -33,7 +33,7 @@ pip install modal torch transformers datasets evaluate sacrebleu rouge_score nlt
 
 ```bash
 modal run train.py
-modal run train_gec.py
+modal run train_two_stage.py
 ```
 
 ### Prepare and upload a dataset
@@ -50,8 +50,8 @@ python push_model.py --repo-id your-username/your-model-name
 
 ## How to adapt for your own task
 
-1. Replace the dataset path in `train.py` with your Hugging Face dataset
-2. Update the instruction prefix in the `preprocess_function` to match your task
+1. Replace the dataset path in `train.py` or `train_two_stage.py` with your Hugging Face dataset
+2. Update the instruction prefix in the `preprocess_function` to match your task (for instruct-tuned models only)
 3. Adjust model architecture, batch size, and training args as needed
 4. See `examples/gec/` for a complete end-to-end grammar error correction pipeline
 
