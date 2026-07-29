@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.env
+.venv/
+venv/
+.cache/
+*.spacy
+
+.DS_Store
+*.safetensors
+training_args.bin
