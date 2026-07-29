@@ -1,7 +1,23 @@
+"""
+Two-stage curriculum training on Modal.
+
+Stage 1: Train on a large, noisier dataset (e.g. synthetic data)
+Stage 2: Fine-tune on a smaller, higher-quality dataset
+
+Adapt the normalize_* functions and dataset names for your own task.
+"""
 import modal
 
 
-app = modal.App("flan-t5-small-gec-gramercy")
+# -- Adjust these for your project -------------------------------------------
+APP_NAME = "my-two-stage-training"
+MODEL_ID = "google/flan-t5-small"          # base model from HuggingFace
+GPU = "L40S"
+TIMEOUT = 60 * 60 * 4                       # 4 hours
+VOLUME_NAME = "my-training-artifacts"
+# ---------------------------------------------------------------------------
+
+app = modal.App(APP_NAME)
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -15,94 +31,93 @@ image = (
     )
 )
 
-volume = modal.Volume.from_name("flan-t5-small-gec-gramercy-artifacts", create_if_missing=True)
+volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
-@app.function(image=image, gpu="L40S", timeout=60 * 60 * 4, volumes={"/mnt/model": volume})
+
+@app.function(image=image, gpu=GPU, timeout=TIMEOUT, volumes={"/mnt/model": volume})
 def train():
     from datasets import Dataset, load_dataset
-    from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, Seq2SeqTrainingArguments, Seq2SeqTrainer
+    from transformers import (
+        AutoTokenizer,
+        AutoModelForSeq2SeqLM,
+        Seq2SeqTrainingArguments,
+        Seq2SeqTrainer,
+    )
 
-    tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-small")
-    model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-small")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_ID)
     model.config.tie_word_embeddings = False
 
-    coedit = load_dataset("grammarly/coedit")
-    coedit_train = coedit["train"].shuffle(seed=42)
+    # -- Stage 1 dataset (noisy / synthetic) ---------------------------------
+    # Replace with your own dataset and normalization logic.
+    # Expected output columns: "src" (input text), "tgt" (target text).
+    noise_dataset = load_dataset("your-username/your-dataset")
+    noise_train = noise_dataset["train"].shuffle(seed=42)
+    noise_eval = noise_dataset["validation"].shuffle(seed=42).select(range(2000))
 
-    c4_200m_gec_stream = load_dataset("martinsr/c4_200m", split="train", streaming=True).shuffle(seed=42)
-    c4_200m_gec = c4_200m_gec_stream.take(35000)
-    c4_200m_gec_eval = c4_200m_gec_stream.skip(35000).take(2000)
+    def normalize_noise(examples):
+        return {
+            "src": examples["src"],
+            "tgt": examples["tgt"],
+        }
 
-    # jfleg_gec = load_dataset("jhu-clsp/jfleg")
+    normalized_noise_train = Dataset.from_list(
+        [normalize_noise(row) for row in noise_train]
+    )
+    normalized_noise_eval = Dataset.from_list(
+        [normalize_noise(row) for row in noise_eval]
+    )
 
-    def normalize_coedit_train(dataset):
-        rows = [
-            {
-                "src": "Correct grammar, agreement, tense, articles, and punctuation in this text: " + row["src"].split(": ", 1)[1],
-                "tgt": row["tgt"],
-                "task": row["task"],
-                "source": "coedit",
-            }
-            for row in dataset
-            if row["task"] == "gec"
-        ]
-        return Dataset.from_list(rows)
+    # -- Stage 2 dataset (high-quality) --------------------------------------
+    # Replace with your own dataset and normalization logic.
+    quality_dataset = load_dataset("your-username/your-quality-dataset")
+    quality_train = quality_dataset["train"].shuffle(seed=42)
 
-    def normalize_c4_train(dataset, limit):
-        rows = []
-        for row in dataset:
-            rows.append(
-                {
-                    "src": "Correct grammar, agreement, tense, articles, and punctuation in this text: " + row["input"],
-                    "tgt": row["output"],
-                    "task": "gec",
-                    "source": "c4_200m",
-                }
-            )
-            if len(rows) >= limit:
-                break
-        return Dataset.from_list(rows)
+    def normalize_quality(examples):
+        return {
+            "src": examples["src"],
+            "tgt": examples["tgt"],
+        }
 
-    # def normalize_jfleg_split(dataset):
-    #     rows = [
-    #         {
-    #             "src": row["sentence"],
-    #             "tgt": correction,
-    #             "task": "gec",
-    #             "source": "jfleg",
-    #         }
-    #         for row in dataset
-    #         for correction in row["corrections"]
-    #     ]
-    #     return Dataset.from_list(rows)
+    normalized_quality_train = Dataset.from_list(
+        [normalize_quality(row) for row in quality_train]
+    )
 
+    # -- Shared preprocessing -------------------------------------------------
     def preprocess_function(examples):
-        inputs = [input for input in examples["src"]]
-        targets = [answer for answer in examples["tgt"]]
+        # If using an instruct-tuned model (e.g. FLAN-T5), prepend a task
+        # instruction to each input. Skip this step for base (non-instruct)
+        # variants like t5-base or bart-base.
+        #   inputs = ["correct grammar: " + src for src in examples["src"]]
+        inputs = [src for src in examples["src"]]
+        targets = [tgt for tgt in examples["tgt"]]
 
-        model_inputs = tokenizer(inputs, max_length=512, truncation=True, padding='max_length')
-        labels = tokenizer(targets, max_length=160, truncation=True, padding='max_length')
+        model_inputs = tokenizer(
+            inputs, max_length=512, truncation=True, padding="max_length"
+        )
+        labels = tokenizer(
+            targets, max_length=160, truncation=True, padding="max_length"
+        )
 
         labels["input_ids"] = [
             [tok if tok != tokenizer.pad_token_id else -100 for tok in label]
             for label in labels["input_ids"]
         ]
-
         model_inputs["labels"] = labels["input_ids"]
-
         return model_inputs
 
-    normalized_coedit_train = normalize_coedit_train(coedit_train)
-    normalized_c4_200m_train = normalize_c4_train(c4_200m_gec, limit=35000)
-    # normalized_jfleg_val = normalize_jfleg_split(jfleg_gec["validation"])
-    normalized_c4_200m_eval = normalize_c4_train(c4_200m_gec_eval, limit=2000)
+    tokenized_noise_train = normalized_noise_train.map(
+        preprocess_function, batched=True
+    )
+    tokenized_noise_eval = normalized_noise_eval.map(
+        preprocess_function, batched=True
+    )
+    tokenized_quality_train = normalized_quality_train.map(
+        preprocess_function, batched=True
+    )
 
-    tokenized_coedit = normalized_coedit_train.map(preprocess_function, batched=True)
-    tokenized_c4_200m = normalized_c4_200m_train.map(preprocess_function, batched=True)
-    tokenized_c4_200m_eval = normalized_c4_200m_eval.map(preprocess_function, batched=True)
-    # tokenized_jfleg_val = normalized_jfleg_val.map(preprocess_function, batched=True)
-
-    training_stage_1_args = Seq2SeqTrainingArguments(
+    # -- Stage 1: train on noisy data ----------------------------------------
+    stage_1_args = Seq2SeqTrainingArguments(
         output_dir="/mnt/model/checkpoints/stage_1",
         eval_strategy="epoch",
         learning_rate=3e-4,
@@ -115,21 +130,20 @@ def train():
         generation_max_length=160,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
-        save_strategy="epoch"
+        save_strategy="epoch",
     )
 
-    # Initialize the Trainer
     trainer_stage_1 = Seq2SeqTrainer(
         model=model,
-        args=training_stage_1_args,
-        train_dataset=tokenized_c4_200m,
-        eval_dataset=tokenized_c4_200m_eval,
+        args=stage_1_args,
+        train_dataset=tokenized_noise_train,
+        eval_dataset=tokenized_noise_eval,
     )
-
     trainer_stage_1.train()
     trainer_stage_1.save_model("/mnt/model/stage_1")
 
-    training_stage_2_args = Seq2SeqTrainingArguments(
+    # -- Stage 2: fine-tune on high-quality data -----------------------------
+    stage_2_args = Seq2SeqTrainingArguments(
         output_dir="/mnt/model/checkpoints/stage_2",
         eval_strategy="epoch",
         learning_rate=2e-4,
@@ -142,20 +156,18 @@ def train():
         generation_max_length=160,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
-        save_strategy="epoch"
+        save_strategy="epoch",
     )
-
 
     model_stage_1 = AutoModelForSeq2SeqLM.from_pretrained("/mnt/model/stage_1")
 
     trainer_stage_2 = Seq2SeqTrainer(
         model=model_stage_1,
-        args=training_stage_2_args,
-        train_dataset=tokenized_coedit,
-        eval_dataset=tokenized_c4_200m_eval,
+        args=stage_2_args,
+        train_dataset=tokenized_quality_train,
+        eval_dataset=tokenized_noise_eval,
     )
-
-    trainer_stage_2.train() 
+    trainer_stage_2.train()
 
     # FLAN-T5 uses an untied LM head. If this is saved as true, transformers
     # ties lm_head to shared embeddings on load and generation collapses into
@@ -165,6 +177,7 @@ def train():
     trainer_stage_2.save_model("/mnt/model/final")
     tokenizer.save_pretrained("/mnt/model/final")
     volume.commit()
+
 
 @app.local_entrypoint()
 def main():

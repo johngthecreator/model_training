@@ -1,7 +1,14 @@
+"""
+GEC single-stage example: fine-tune FLAN-T5-base on a combined GEC + coherence dataset.
+
+Contrasts with examples/gec/train_gec.py (two-stage curriculum).
+
+See the root train.py for the generic template.
+"""
 import modal
 
 
-app = modal.App("flan-t5-base-grammary")
+app = modal.App("gec-single-stage-example")
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -15,39 +22,41 @@ image = (
     )
 )
 
-volume = modal.Volume.from_name("flan-t5-small-coedit-artifacts", create_if_missing=True)
+volume = modal.Volume.from_name("gec-training-artifacts", create_if_missing=True)
+
 
 @app.function(image=image, gpu="H100", timeout=60 * 60 * 4, volumes={"/mnt/model": volume})
 def train():
     from datasets import load_dataset
-    from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, Seq2SeqTrainingArguments, Seq2SeqTrainer
+    from transformers import (
+        AutoTokenizer,
+        AutoModelForSeq2SeqLM,
+        Seq2SeqTrainingArguments,
+        Seq2SeqTrainer,
+    )
 
     tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-small")
     model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-small")
     model.config.tie_word_embeddings = False
 
-    # Replace with your Hugging Face dataset path
-    dataset = load_dataset("your-username/your-dataset-name")
+    dataset = load_dataset("JohnGorri/gec-coherence-coedit-synth")
 
     def preprocess_function(examples):
-        # If using an instruct-tuned model (e.g. FLAN-T5), prepend a task
-        # instruction to each input. Skip this step for base (non-instruct)
-        # variants like t5-base or bart-base.
-        #   inputs = ["correct grammar: " + src for src in examples["src"]]
-        inputs = [ input for input in examples['src']]
-        targets = [ answer for answer in examples['tgt']]
+        inputs = [src for src in examples["src"]]
+        targets = [tgt for tgt in examples["tgt"]]
 
-        # Tokenize inputs and outputs
-        model_inputs = tokenizer(inputs, max_length=512, truncation=True, padding='max_length')
-        labels = tokenizer(targets, max_length=160, truncation=True, padding='max_length')
+        model_inputs = tokenizer(
+            inputs, max_length=512, truncation=True, padding="max_length"
+        )
+        labels = tokenizer(
+            targets, max_length=160, truncation=True, padding="max_length"
+        )
 
         labels["input_ids"] = [
             [tok if tok != tokenizer.pad_token_id else -100 for tok in label]
             for label in labels["input_ids"]
         ]
-
         model_inputs["labels"] = labels["input_ids"]
-
         return model_inputs
 
     tokenized_dataset = dataset.map(preprocess_function, batched=True)
@@ -65,24 +74,20 @@ def train():
         generation_max_length=160,
     )
 
-    # Initialize the Trainer
     trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_dataset["train"],
         eval_dataset=tokenized_dataset["validation"],
     )
-
     trainer.train()
 
-    # FLAN-T5 uses an untied LM head. If this is saved as true, transformers
-    # ties lm_head to shared embeddings on load and generation collapses into
-    # repeated multilingual tokens.
     model.config.tie_word_embeddings = False
     model.config.use_cache = True
     trainer.save_model("/mnt/model/final")
     tokenizer.save_pretrained("/mnt/model/final")
     volume.commit()
+
 
 @app.local_entrypoint()
 def main():
